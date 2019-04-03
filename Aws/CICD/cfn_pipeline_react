@@ -1,0 +1,373 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Resources:
+  rPipelineBucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Ref pPipelineBucketName
+      Tags:
+        - Key: CFNOwner
+          Value: !Ref pCFNOwnerTag
+        - Key: ENV
+          Value: !Ref pEnv
+        - Key: AppName
+          Value: !Ref pApplicationName
+  rProjectBucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Ref pProjectBucketName
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+      Tags:
+        - Key: CFNOwner
+          Value: !Ref pCFNOwnerTag
+        - Key: ENV
+          Value: !Ref pEnv
+        - Key: AppName
+          Value: !Ref pApplicationName
+  rProjectBucketPolicy:
+    Type: "AWS::S3::BucketPolicy"
+    Properties:
+      Bucket: !Ref rProjectBucket
+      PolicyDocument:
+         Statement:
+          - Sid: "Allow Requests"
+            Action:
+              - 's3:GetObject'
+            Effect: 'Allow'
+            Resource: 
+              - !Join
+                - ''
+                - - "arn:aws:s3:::"
+                  - !Ref rProjectBucket
+                  - '/*'
+            Principal: '*'
+            Condition: 
+              StringLike: 
+                aws:Referer: !Ref pReferer
+                aws:UserAgent: Amazon CloudFront
+          - Sid: "Deny Requests"
+            Action:
+              - 's3:GetObject'
+            Effect: 'Deny'
+            Resource: 
+              - !Join
+                - ''
+                - - "arn:aws:s3:::"
+                  - !Ref rProjectBucket
+                  - '/*'
+            Principal: '*'
+            Condition: 
+              StringNotLike: 
+                aws:Referer: !Ref pReferer
+                aws:UserAgent: Amazon CloudFront
+  rPipeline:
+    Type: "AWS::CodePipeline::Pipeline"
+    Properties:
+    Properties:
+      Name: !Sub '${AWS::StackName}-PIPELINE-${pEnv}'
+      RoleArn: !GetAtt rPipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location:
+          Ref: rPipelineBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: 1
+                Provider: GitHub
+              OutputArtifacts:
+                - Name: SourceOuput
+              Configuration:
+                Owner: !Ref pGitHubAccount
+                Repo: !Ref pGitHubRepo
+                PollForSourceChanges: 'true'
+                Branch: !Ref pGitHubRepoBranch
+                OAuthToken: !Ref pGitHubToken
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: CodeBuild
+              InputArtifacts:
+                - Name: SourceOuput
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              OutputArtifacts:
+                - Name: BuildOutput
+              Configuration:
+                ProjectName:
+                  Ref: rBuildProject
+              RunOrder: 1
+        - Name: Deploy
+          Actions:
+            - Name: CodeBuild
+              InputArtifacts:
+                - Name: BuildOutput
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              OutputArtifacts:
+                - Name: DeployOutput
+              Configuration:
+                ProjectName:
+                  Ref: rDeployProject
+              RunOrder: 1
+  rPipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-PIPELINE-ROLE-${pEnv}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal: {Service: [codepipeline.amazonaws.com]}
+          Action: ['sts:AssumeRole']
+      Policies:
+      - PolicyName: !Sub '${AWS::StackName}-PIPELINE-POLICY-${pEnv}'
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - 'logs:CreateLogGroup'
+                - 'logs:CreateLogStream'
+                - 'logs:PutLogEvents'
+                - 'logs:DescribeLogStreams'
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - 'codebuild:BatchGetBuilds'
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - 'codebuild:StartBuild'
+              Resource:
+                - !GetAtt rBuildProject.Arn
+                - !GetAtt rDeployProject.Arn
+            - Effect: Allow
+              Action:
+                - 's3:PutObject'
+                - 's3:ListObjects'
+                - 's3:GetObject'
+                - 's3:ListBucket'
+              Resource:
+                - !GetAtt rPipelineBucket.Arn
+                - !Join
+                  - ''
+                  - - !GetAtt rPipelineBucket.Arn
+                    - '/*'
+              Resource: '*'
+  rBuildProject:
+    Type: "AWS::CodeBuild::Project"
+    Properties:
+      Name: !Sub '${AWS::StackName}-BUILDPROJECT-${pEnv}'
+      ServiceRole: !Ref rBuildProjectRole
+      BadgeEnabled: 'false'
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        PrivilegedMode: 'false'
+        Image: node:8
+        EnvironmentVariables:
+            -
+                Name: GITHUBTOKEN
+                Type: PLAINTEXT
+                Value: !Ref pGitHubToken
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub |
+            version: 0.2
+            env:
+              variables:
+                GITHUBTOKEN: ${pGitHubToken}
+            phases:
+              install:
+                commands:
+                  - echo Build started on `date`
+                  - echo Instaling packages
+                  - apt-get update && apt-get install zip -y
+                  - export NODE_ENV=development
+                  - sed -i -e "s/github.com\/repo\/project-name/$GITHUBTOKEN@github.com\/repo\/project-name/g" ./package.json
+                  - yarn install
+              build:
+                commands:
+                  - echo Building React Project
+                  - yarn build
+              post_build:
+                commands:
+                  - echo Transferring files to S3
+                  - zip -r deploy.zip build/
+            artifacts:
+              files:
+                - deploy.zip
+      TimeoutInMinutes: 10
+      Cache:
+        Type: NO_CACHE
+      Tags:
+        - Key: CFNOwner
+          Value: !Ref pCFNOwnerTag
+        - Key: ENV
+          Value: !Ref pEnv
+        - Key: AppName
+          Value: !Ref pApplicationName
+  rBuildProjectRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-BUILDPROJECT-ROLE-${pEnv}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal: {Service: [codebuild.amazonaws.com]}
+          Action: ['sts:AssumeRole']
+      Policies:
+      - PolicyName: !Sub '${AWS::StackName}-BUILDPROJECT-POLICY-${pEnv}'
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - 'logs:CreateLogGroup'
+                - 'logs:CreateLogStream'
+                - 'logs:PutLogEvents'
+                - 'logs:DescribeLogStreams'
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - 's3:PutObject'
+                - 's3:ListObjects'
+                - 's3:GetObject'
+                - 's3:ListBucket'
+              Resource:
+                - !GetAtt rPipelineBucket.Arn
+                - !Join
+                  - ''
+                  - - !GetAtt rPipelineBucket.Arn
+                    - '/*'
+  rDeployProject:
+    Type: "AWS::CodeBuild::Project"
+    Properties:
+      Name: !Sub '${AWS::StackName}-DEPLOYPROJECT-${pEnv}'
+      ServiceRole: !Ref rDeployProjectRole
+      BadgeEnabled: 'false'
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        PrivilegedMode: 'false'
+        Image: aws/codebuild/nodejs:6.3.1
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub |
+            version: 0.2
+            phases:
+              build:
+                commands:
+                  - echo Transferring files to S3
+                  - unzip deploy.zip
+                  - aws s3 cp build/ s3://${rProjectBucket}/ --recursive --region ${AWS::Region}
+                  - echo Build completed on `date`
+      TimeoutInMinutes: 10
+      Cache:
+        Type: NO_CACHE
+      Tags:
+        - Key: CFNOwner
+          Value: !Ref pCFNOwnerTag
+        - Key: ENV
+          Value: !Ref pEnv
+        - Key: AppName
+          Value: !Ref pApplicationName
+  rDeployProjectRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-DEPLOYPROJECT-ROLE-${pEnv}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal: {Service: [codebuild.amazonaws.com]}
+          Action: ['sts:AssumeRole']
+      Policies:
+      - PolicyName: !Sub '${AWS::StackName}-DEPLOYPROJECT-POLICY-${pEnv}'
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - 'logs:CreateLogGroup'
+                - 'logs:CreateLogStream'
+                - 'logs:PutLogEvents'
+                - 'logs:DescribeLogStreams'
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - 's3:PutObject'
+                - 's3:ListObjects'
+                - 's3:GetObject'
+                - 's3:ListBucket'
+              Resource:
+                - !GetAtt rPipelineBucket.Arn
+                - !Join
+                  - ''
+                  - - !GetAtt rPipelineBucket.Arn
+                    - '/*'
+            - Effect: Allow
+              Action:
+                - 's3:PutObject'
+              Resource:
+                - !GetAtt rProjectBucket.Arn
+                - !Join
+                  - ''
+                  - - !GetAtt rProjectBucket.Arn
+                    - '/*'
+Parameters:
+  pGitHubToken:
+    Type: 'String'
+    Description: "Enter the GitHub Token"
+    NoEcho: true
+  pGitHubAccount:
+    Type: 'String'
+    Description: "Enter the GitHub Account Name"
+  pGitHubRepo:
+    Type: 'String'
+    Description: "Enter the GitHub Repo Name"
+  pGitHubRepoBranch:
+    Type: 'String'
+    Default: 'dev'
+    Description: "Enter the Branch you wish to pull from in the GitHub repo"
+  pProjectBucketName:
+    Type: 'String'
+    Description: "The name of the S3 bucket that will contain the built project"
+  pPipelineBucketName:
+    Type: 'String'
+    Description: "The name of the S3 bucket that will contain the pipeline artifacts"
+  pCFNOwnerTag:
+    Type: 'String'
+    Description: "The owner of this stack (for tagging of resources)"
+  pEnv:
+    Type: 'String'
+    Description: "The environment"
+  pApplicationName:
+    Type: 'String'
+    Description: "The name of the application"
+  pReferer:
+    Type: 'String'
+    Description: "The referer header value for restricting access to S3"
+    NoEcho: true
+Outputs:
+  oWebsiteUrl:
+    Value: !GetAtt rProjectBucket.WebsiteURL
+    Description: The S3 Website URL

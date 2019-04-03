@@ -1,0 +1,84 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Resources:
+# CloudFront Distribution
+  ## Configure the CloudFront distribution for the frontend /react/html app hosted in S3.
+  rCFDistribution:
+    Type: "AWS::CloudFront::Distribution"
+    Properties:
+      DistributionConfig:
+        PriceClass: PriceClass_100
+        WebACLId: !Ref pWebACLId
+        Logging:
+          Bucket: central-cloudfront.s3.amazonaws.com
+          Prefix: !Ref "AWS::AccountId"
+        ViewerCertificate:
+          AcmCertificateArn: !Ref pCFCertificateArn
+          MinimumProtocolVersion: "TLSv1.2_2018"
+          SslSupportMethod: "sni-only"
+        Aliases:
+          - !Sub '${pSiteName}.${pHostedZoneName}'
+        Comment: Distribution for the S3web+Pipeline Pattern
+        DefaultCacheBehavior:
+          TargetOriginId: !Sub 'S3-Website-${pFrontendS3BucketDomain}.s3-website-${AWS::Region}.amazonaws.com'
+          ViewerProtocolPolicy: redirect-to-https
+          ForwardedValues:
+            QueryString: false
+          MaxTTL: 3153600
+          MinTTL: 0
+          SmoothStreaming: false
+          DefaultTTL: 100
+          Compress: false
+        Enabled: true
+        Origins:
+          -
+            DomainName: !Sub '${pSiteName}.${pHostedZoneName}.s3-website-${AWS::Region}.amazonaws.com'
+            OriginCustomHeaders:
+              - HeaderName: Referer
+                HeaderValue: !Ref pRefererValue
+            Id: !Sub 'S3-Website-${pFrontendS3BucketDomain}.s3-website-${AWS::Region}.amazonaws.com'
+            CustomOriginConfig:
+              HTTPPort: 80
+              HTTPSPort: 443
+              OriginKeepaliveTimeout: 5
+              OriginProtocolPolicy: http-only
+              OriginReadTimeout: 30
+              OriginSSLProtocols:
+                - 'TLSv1'
+                - 'TLSv1.1'
+                - 'TLSv1.2'
+      Tags:
+        - Key: CFNOwner
+          Value: !Ref pCFNOwnerTag
+        - Key: ENV
+          Value: !Ref pEnv
+        - Key: AppName
+          Value: !Ref pApplicationName
+
+Parameters:
+  pEnv:
+    Type: String
+  pFrontendS3BucketDomain:
+    Type: String
+  pSiteName:
+    Type: String
+  pHostedZoneName:
+    Type: String
+  pCFNOwnerTag:
+    Type: String
+  pApplicationName:
+    Type: String
+  pCFCertificateArn:
+    Type: String
+  pRefererValue:
+    Type: String
+    NoEcho: true
+  pWebACLId:
+    Type: String
+    Default: 
+    Description:
+    
+Outputs:
+  oCFDistribution:
+    Description: 'RESOURCE - CLOUDFRONT - The CloudFront distribution for the frontend application'
+    Value: !Ref rCFDistribution
