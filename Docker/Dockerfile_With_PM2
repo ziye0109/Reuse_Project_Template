@@ -1,0 +1,24 @@
+FROM keymetrics/pm2:10-alpine
+
+
+## install git for dependencies
+RUN apk update && apk upgrade && \
+    apk add --no-cache bash git openssh && \
+    npm config set strict-ssl false && \
+    npm i git-credential-envvar -g && \
+    git config --global credential.helper envvar
+
+
+ARG GIT_USERNAME
+ENV GITCREDENTIALUSERNAME=$GIT_USERNAME
+
+ARG GIT_PASSWORD
+ENV GITCREDENTIALPASSWORD=$GIT_PASSWORD
+
+COPY . project-name/
+WORKDIR project-name
+
+RUN npm install
+
+EXPOSE 3000
+ENTRYPOINT ["npm", "run", "pm2"]

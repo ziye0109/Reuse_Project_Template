@@ -1,0 +1,43 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_ACCOUNT: "xxxxxxxx"
+    AWS_DEFAULT_REGION: "us-west-2"
+    ECR_REPO: ""
+    REPOSITORY_URI_STR: "$AWS_ACCOUNT.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$ECR_REPO"
+    REPOSITORY_URI: ""
+  parameter-store:
+    GITHUB_TOKEN: GITHUB_TOKEN
+    GITHUB_USER: GITHUB_USER
+
+phases:
+  pre_build:
+    commands:
+      - echo Logging in to Amazon ECR...
+      - $(aws ecr get-login --no-include-email --region us-west-2)
+      - aws s3 cp s3://certs/certs.tar .
+      - tar xvf certs.tar
+      - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+      - IMAGE_TAG=$SWAP_ENV-${COMMIT_HASH:=latest}
+      - mkdir identity
+      - aws s3 cp s3://certs/$SWAP_ENV/identity.pem identity/
+      - aws s3 cp s3://certs/$SWAP_ENV/identity.key identity/
+  build:
+    commands:
+      - echo Building the Docker image...
+      - REPOSITORY_URI=$(eval echo ${REPOSITORY_URI_STR})
+      - docker build -t $REPOSITORY_URI:latest --build-arg GIT_PASSWORD=${GITHUB_TOKEN} .
+      - docker tag $REPOSITORY_URI:latest ${REPOSITORY_URI}:$IMAGE_TAG
+  post_build:
+    commands:
+      - echo Pushing the Docker images...
+      - REPOSITORY_URI=$(eval echo ${REPOSITORY_URI_STR})
+      - docker push ${REPOSITORY_URI}:latest
+      - docker push ${REPOSITORY_URI}:$IMAGE_TAG
+      - echo Writing image definitions file...
+      - printf '[{"name":"container","imageUri":"%s"}]' ${REPOSITORY_URI}:$IMAGE_TAG > imagedefinitions.json
+
+artifacts:
+  files:
+    - imagedefinitions.json

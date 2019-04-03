@@ -1,0 +1,27 @@
+FROM keymetrics/pm2:10-alpine
+
+## install git for dependencies
+RUN apk update && apk upgrade && \
+    apk add --no-cache bash git openssh
+
+
+ARG GIT_PASSWORD
+ENV GITCREDENTIALPASSWORD=$GIT_PASSWORD
+
+RUN mkdir -p /etc/ssl/identity /etc/ssl/certs/pge /project-name
+WORKDIR /project-name
+
+RUN mkdir src config
+ADD package.json ./
+ADD src src/
+ADD config config/
+
+ADD certs/ /etc/ssl/certs/pge/
+ADD identity/ /etc/ssl/identity/
+
+RUN chown root:root -R /etc/ssl/
+
+RUN git config --global url."https://${GITCREDENTIALPASSWORD}:x-oauth-basic@github.com".insteadOf "https://github.com" && npm install
+
+EXPOSE 3000
+ENTRYPOINT ["pm2-runtime", "src/index.js"]
